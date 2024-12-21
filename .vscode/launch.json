@@ -1,0 +1,27 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Debug (Linux)",
+            "type": "lldb",
+            "request": "launch",
+            "program": "${workspaceFolder}/bin/linux/EXE",
+            "args": [],
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal",
+            "terminal": "integrated",
+            "stopOnEntry": false
+        },
+        {
+            "name": "Debug (Windows)",
+            "type": "lldb",
+            "request": "launch",
+            "program": "${workspaceFolder}/bin/win32/EXE.exe",
+            "args": [],
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal",
+            "terminal": "integrated",
+            "stopOnEntry": false
+        },
+    ]
+}

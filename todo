@@ -1,0 +1,3 @@
+add info -> on each allocator
+add read md file with detailed explation of algos
+check and fix fragmentation issue in freelist allocator
