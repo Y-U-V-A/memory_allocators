@@ -1,4 +1,4 @@
-#include "testing_linear_allocator.h"
+#include "testing_freelist_allocator.h"
 #include "zthread.h"
 #include "expect.h"
 #include "test_manager.h"

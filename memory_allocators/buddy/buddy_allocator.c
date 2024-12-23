@@ -54,6 +54,11 @@ buddy_allocator* buddy_allocator_create(u64 size) {
 
     buddy_allocator* allocator = zmemory_allocate(sizeof(buddy_allocator));
     allocator->block = zmemory_allocate(size);
+    if (allocator->block == 0) {
+        LOGE("buddy_allocator_create : failed to allocate memory");
+        zmemory_free(allocator, sizeof(buddy_allocator));
+        return 0;
+    }
     allocator->size = size;
     allocator->used = 0;
     allocator->freelist = zmemory_allocate(power * sizeof(buddy_header*));
@@ -63,10 +68,13 @@ buddy_allocator* buddy_allocator_create(u64 size) {
     allocator->freelist[index]->next = 0;
     allocator->freelist[index]->prev = 0;
     allocator->freelist[index]->size = size;
-    allocator->freelist[index]->unique = 0xF7B3D591E6A4C208;
+    allocator->freelist[index]->unique = 0;
 
     if (!zmutex_create(&allocator->mutex)) {
         LOGE("buddy_allocator_create : failed to create zmutex");
+        zmemory_free(allocator->freelist, allocator->freelist_size * sizeof(buddy_header*));
+        zmemory_free(allocator->block, allocator->size);
+        zmemory_free(allocator, sizeof(buddy_allocator));
         return 0;
     }
 

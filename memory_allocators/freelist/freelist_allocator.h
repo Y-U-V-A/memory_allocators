@@ -1,5 +1,5 @@
-#ifndef FREELIST_ALLOCATOR__H
-#define FREELIST_ALLOCATOR__H
+#ifndef FREE_LIST_ALLOCATOR__H
+#define FREE_LIST_ALLOCATOR__H
 
 #include "defines.h"
 
@@ -11,7 +11,7 @@ void freelist_allocator_destroy(freelist_allocator* allocator);
 
 void* freelist_allocator_allocate(freelist_allocator* allocator, u64 size);
 
-void freelist_allocator_free(freelist_allocator* allocator, void* block_addr);
+void freelist_allocator_free(freelist_allocator* allocator, void* block);
 
 void freelist_allocator_reset(freelist_allocator* allocator);
 

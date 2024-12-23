@@ -29,12 +29,19 @@ pool_allocator* pool_allocator_create(u64 size, u64 chunk_size) {
 
     pool_allocator* allocator = zmemory_allocate(sizeof(pool_allocator));
     allocator->block = zmemory_allocate(size);
+    if (allocator->block == 0) {
+        LOGE("pool_allocator_create : failed to allocate memory");
+        zmemory_free(allocator, sizeof(pool_allocator));
+        return 0;
+    }
     allocator->size = size;
     allocator->block_size = chunk_size;
     allocator->head = allocator->block;
     allocator->head->next = 0;
     if (!zmutex_create(&allocator->mutex)) {
         LOGE("pool_allocator_create : failed to create zmutex");
+        zmemory_free(allocator->block, allocator->size);
+        zmemory_free(allocator, sizeof(pool_allocator));
         return 0;
     }
 

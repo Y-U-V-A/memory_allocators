@@ -2,26 +2,30 @@
 #include "logger.h"
 #include "zmemory.h"
 #include "zmutex.h"
-//////////////////////////////////////////////////////////////////////////////
-//   ______                                     __  __              __      //
-//  /      \                                   /  |/  |            /  |     //
-// /$$$$$$  |______    ______    ______        $$ |$$/   _______  _$$ |_    //
-// $$ |_ $$//      \  /      \  /      \       $$ |/  | /       |/ $$   |   //
-// $$   |  /$$$$$$  |/$$$$$$  |/$$$$$$  |      $$ |$$ |/$$$$$$$/ $$$$$$/    //
-// $$$$/   $$ |  $$/ $$    $$ |$$    $$ |      $$ |$$ |$$      \   $$ | __  //
-// $$ |    $$ |      $$$$$$$$/ $$$$$$$$/       $$ |$$ | $$$$$$  |  $$ |/  | //
-// $$ |    $$ |      $$       |$$       |      $$ |$$ |/     $$/   $$  $$/  //
-// $$/     $$/        $$$$$$$/  $$$$$$$/       $$/ $$/ $$$$$$$/     $$$$/   //
-//                                                                          //
-//////////////////////////////////////////////////////////////////////////////
+#include "unordered_set.h"
+
+////////////////////////////////////////////////////////////////////////
+//   ______                               __  __              __      //
+//  /      \                             /  |/  |            /  |     //
+// /$$$$$$  |______    ______    ______  $$ |$$/   _______  _$$ |_    //
+// $$ |_ $$//      \  /      \  /      \ $$ |/  | /       |/ $$   |   //
+// $$   |  /$$$$$$  |/$$$$$$  |/$$$$$$  |$$ |$$ |/$$$$$$$/ $$$$$$/    //
+// $$$$/   $$ |  $$/ $$    $$ |$$    $$ |$$ |$$ |$$      \   $$ | __  //
+// $$ |    $$ |      $$$$$$$$/ $$$$$$$$/ $$ |$$ | $$$$$$  |  $$ |/  | //
+// $$ |    $$ |      $$       |$$       |$$ |$$ |/     $$/   $$  $$/  //
+// $$/     $$/        $$$$$$$/  $$$$$$$/ $$/ $$/ $$$$$$$/     $$$$/   //
+//                                                                    //
+////////////////////////////////////////////////////////////////////////
 
 #define ALIGN_UP(val, alignment) (((val) + ((alignment) - 1)) & (~((alignment) - 1)))
-#define FREE_LIST_HEADER_SIZE sizeof(freelist_header)
+#define IS_POWER_OF_TWO(val) (((val) != 0) && (((val) & ((val) - 1)) == 0))
+#define FREELIST_HEADER_SIZE sizeof(freelist_header)
 
 typedef struct freelist_header {
+    u64 unique; // 0xF7B3D591E6A4C208
     u64 size;
     struct freelist_header* next;
-    u64 unique; // 0xF7B3D591E6A4C208;
+    struct freelist_header* prev;
 } freelist_header;
 
 typedef struct freelist_allocator {
@@ -32,29 +36,36 @@ typedef struct freelist_allocator {
     zmutex mutex;
 } freelist_allocator;
 
-freelist_header* is_connected(freelist_allocator* allocator, u64 addr);
+freelist_header* get_best_fit_block(freelist_header* node, u64 size);
+void freelist_coalescing(freelist_allocator* allocator);
 
 freelist_allocator* freelist_allocator_create(u64 size) {
-    if (size == 0 || size <= FREE_LIST_HEADER_SIZE) {
-        LOGE("freelist_create : invalid params");
+    if (size == 0 || IS_POWER_OF_TWO(size) == 0) {
+        LOGE("freelist_allocator_create : invalid params");
         return 0;
     }
-    // initial memory addr returned by malloc will be 8 byte aligned
+
     freelist_allocator* allocator = zmemory_allocate(sizeof(freelist_allocator));
     allocator->block = zmemory_allocate(size);
+    if (allocator->block == 0) {
+        LOGE("freelist_allocator_create:failed to allocate memory");
+        zmemory_free(allocator, sizeof(freelist_allocator));
+        return 0;
+    }
     allocator->size = size;
     allocator->used = 0;
     allocator->head = allocator->block;
+    allocator->head->unique = 0;
     allocator->head->size = size;
     allocator->head->next = 0;
-    allocator->head->unique = 0xF7B3D591E6A4C208;
+    allocator->head->prev = 0;
     if (!zmutex_create(&allocator->mutex)) {
-        LOGE("freelist_create : failed to create mutex");
+        LOGE("freelist_allocator_create : failed to create mutex");
+        zmemory_free(allocator->block, size);
+        zmemory_free(allocator, sizeof(freelist_allocator));
         return 0;
     }
-
     LOGT("freelist_allocator_create");
-
     return allocator;
 }
 
@@ -70,127 +81,135 @@ void freelist_allocator_destroy(freelist_allocator* allocator) {
     LOGT("freelist_allocator_destroy");
 }
 
+// default 8 byte alignment;
 void* freelist_allocator_allocate(freelist_allocator* allocator, u64 size) {
     if (allocator == 0 || size == 0 || size >= allocator->size) {
         LOGE("freelist_allocator_allocate : invalid params");
         return 0;
     }
 
-    zmutex_lock(&allocator->mutex);
-
-    // by default using best fit allocation
-
-    freelist_header* block = allocator->head;
-    freelist_header* block_prev = block;
-    freelist_header* curr_best = 0;
-    freelist_header* curr_best_prev = 0;
-    size += FREE_LIST_HEADER_SIZE;
-
-    i32 min_extra = 100000000;
-    while (block) {
-        i32 diff = block->size - size;
-        if (diff >= 0 && diff <= min_extra) {
-            min_extra = diff;
-            curr_best_prev = block_prev;
-            curr_best = block;
-        }
-        block_prev = block;
-        block = block->next;
-    }
-    if (curr_best == 0) {
+    if (allocator->head == 0 || (allocator->size - allocator->used) <= size) {
         LOGW("freelist_allocator_allocate : no free space");
-        zmutex_unlock(&allocator->mutex);
-
         return 0;
     }
 
-    u64 addr = (u64)curr_best;
-    u64 end = addr + size;
-    u64 aligned_addr = ALIGN_UP(end, 8); // default 8 byte alignment
-    u64 used_size = aligned_addr - addr; // including padding
-    u64 unused_size = curr_best->size - used_size;
+    zmutex_lock(&allocator->mutex);
 
-    if (unused_size > FREE_LIST_HEADER_SIZE) {
-        freelist_header* split_block = (void*)aligned_addr;
-        split_block->size = unused_size;
-        split_block->next = curr_best->next;
-        split_block->unique = 0xF7B3D591E6A4C208;
+    freelist_header* block = get_best_fit_block(allocator->head, size + FREELIST_HEADER_SIZE);
+    if (block == 0) {
+        freelist_coalescing(allocator);
 
-        curr_best->size = used_size;
-
-        if (curr_best == curr_best_prev) {
-            allocator->head = split_block;
-        } else {
-            curr_best_prev->next = split_block;
+        block = get_best_fit_block(allocator->head, size + FREELIST_HEADER_SIZE);
+        if (block == 0) {
+            LOGW("freelist_allocator_allocate: no free space");
+            zmutex_unlock(&allocator->mutex);
+            return 0;
         }
+    }
+    u64 start_addr = (u64)block;
+    u64 end_addr = (u64)block + FREELIST_HEADER_SIZE + size;
+    u64 aligned_end_addr = ALIGN_UP(end_addr, 8);
+    u64 used_size = aligned_end_addr - start_addr;
+    u64 unused_size = block->size - used_size;
+    // only then split the block
+    if (unused_size > FREELIST_HEADER_SIZE) {
+        freelist_header* split = (freelist_header*)aligned_end_addr;
+        split->prev = block->prev;
+        split->next = block->next;
+        split->size = unused_size;
+        split->unique = 0;
 
+        if (block->prev == 0) {
+            allocator->head = split;
+            if (block->next) {
+                block->next->prev = split;
+            }
+        } else {
+            block->prev->next = split;
+            if (block->next) {
+                block->next->prev = split;
+            }
+        }
+        block->size = used_size;
     } else {
-        curr_best_prev->next = curr_best->next;
+        if (block->prev == 0) {
+            allocator->head = block->next;
+            if (block->next) {
+                block->next->prev = 0;
+            }
+        } else {
+            block->prev->next = block->next;
+            if (block->next) {
+                block->next->prev = block->prev;
+            }
+        }
     }
 
-    curr_best->next = 0;
-    allocator->used += size;
+    block->next = 0;
+    block->prev = 0;
+    block->unique = 0xF7B3D591E6A4C208;
+    allocator->used += used_size;
 
     zmutex_unlock(&allocator->mutex);
 
-    return (void*)(addr + FREE_LIST_HEADER_SIZE);
+    return (u8*)block + FREELIST_HEADER_SIZE;
 }
 
-void freelist_allocator_free(freelist_allocator* allocator, void* block_addr) {
-    if (allocator == 0 || block_addr == 0) {
+void freelist_allocator_free(freelist_allocator* allocator, void* block) {
+    if (allocator == 0 || block == 0) {
         LOGE("freelist_allocator_free : invalid params");
         return;
     }
-
     zmutex_lock(&allocator->mutex);
 
-    freelist_header* remove_block = (freelist_header*)((u64)block_addr - FREE_LIST_HEADER_SIZE);
-
+    freelist_header* remove_block = (freelist_header*)((u8*)block - FREELIST_HEADER_SIZE);
     if (((u64)remove_block < (u64)allocator->block) ||
         ((u64)remove_block >= ((u64)allocator->block + allocator->size)) ||
         remove_block->unique != 0xF7B3D591E6A4C208) {
-        LOGE("freelist_allocator_free : invalid memory address");
-        zmutex_unlock(&allocator->mutex);
+        LOGE("freelist_allocator_free : invalid block addr");
         return;
     }
 
     allocator->used -= remove_block->size;
-    freelist_header* block = allocator->head;
-    freelist_header* block_prev = block;
 
-    while (block) {
-        u64 addr = (u64)block;
-        if (addr + block->size == (u64)remove_block) {
-            block->size += remove_block->size;
-            remove_block->unique = 0;
-            freelist_header* node;
-            while ((node = is_connected(allocator, (u64)block + block->size)) != 0) {
-                block->size += node->size;
-            }
+    remove_block->unique = 0;
+
+    freelist_header* node = allocator->head;
+    freelist_header* prev = 0;
+    u64 next_block;
+    u64 prev_block;
+
+    while (node) {
+        next_block = (u64)node + node->size;
+        prev_block = (u64)node - remove_block->size;
+        if (next_block == (u64)remove_block) {
+            node->size += remove_block->size;
             zmutex_unlock(&allocator->mutex);
             return;
-        }
-        if (addr - remove_block->size == (u64)remove_block) {
-            remove_block->next = block->next;
-            remove_block->size += block->size;
-            remove_block->unique = 0xF7B3D591E6A4C208;
-            block->unique = 0;
-            if (block_prev == block) {
-                allocator->head = remove_block;
+        } else if (prev_block == (u64)remove_block) {
+            remove_block->next = node->next;
+            remove_block->prev = node->prev;
+            remove_block->size += node->size;
+
+            if (node->prev) {
+                node->prev->next = remove_block;
             } else {
-                block_prev->next = remove_block;
+                allocator->head = remove_block;
             }
+            if (node->next) {
+                node->next->prev = remove_block;
+            }
+            node->unique = 0;
             zmutex_unlock(&allocator->mutex);
             return;
         }
-
-        block_prev = block;
-        block = block->next;
+        prev = node;
+        node = node->next;
     }
 
-    block_prev->next = remove_block;
+    prev->next = remove_block;
     remove_block->next = 0;
-    remove_block->unique = 0xF7B3D591E6A4C208;
+    remove_block->prev = prev;
 
     zmutex_unlock(&allocator->mutex);
 }
@@ -202,15 +221,14 @@ void freelist_allocator_reset(freelist_allocator* allocator) {
     }
     zmutex_lock(&allocator->mutex);
 
-    allocator->used = 0;
     allocator->head = allocator->block;
-    allocator->head->size = allocator->size;
     allocator->head->next = 0;
-    allocator->head->unique = 0xF7B3D591E6A4C208;
+    allocator->head->prev = 0;
+    allocator->head->size = allocator->size;
+    allocator->head->unique = 0;
+    allocator->used = 0;
 
     zmutex_unlock(&allocator->mutex);
-
-    LOGT("freelist_allocator_reset");
 }
 
 u64 freelist_allocator_used_memory(freelist_allocator* allocator) {
@@ -222,7 +240,7 @@ u64 freelist_allocator_unused_memory(freelist_allocator* allocator) {
 }
 
 u64 freelist_allocator_header_size() {
-    return FREE_LIST_HEADER_SIZE;
+    return FREELIST_HEADER_SIZE;
 }
 
 //////////////////////////////////////////////////////////////////////
@@ -241,25 +259,54 @@ u64 freelist_allocator_header_size() {
 //                                                                  //
 //////////////////////////////////////////////////////////////////////
 
-freelist_header* is_connected(freelist_allocator* allocator, u64 addr) {
-    freelist_header* curr = allocator->head;
-    freelist_header* prev = curr;
+freelist_header* get_best_fit_block(freelist_header* node, u64 size) {
+    freelist_header* best = 0;
+    u64 min_extra = 100000000;
 
-    while (curr) {
-        if ((u64)curr == addr) {
-
-            if (prev == curr) {
-                allocator->head = curr->next;
-                curr->next = 0;
-            } else {
-                prev->next = curr->next;
-                curr->next = 0;
-            }
-            curr->unique = 0;
-            return curr;
+    while (node) {
+        if (node->size >= size && (node->size - size) < min_extra) {
+            min_extra = node->size - size;
+            best = node;
         }
-        prev = curr;
-        curr = curr->next;
+        node = node->next;
     }
-    return 0;
+    return best;
+}
+
+void freelist_coalescing(freelist_allocator* allocator) {
+    LOGT("freelist_allocator : undergoing coalescing ");
+
+    freelist_header* node = allocator->head;
+    unordered_set* set = unordered_set_create(freelist_header*, 0);
+    while (node) {
+        unordered_set_insert(set, node);
+        node = node->next;
+    }
+
+    node = allocator->head;
+    while (node) {
+        freelist_header* next_node = (freelist_header*)((u8*)node + node->size);
+        while (unordered_set_contains(set, next_node)) {
+            node->size += next_node->size;
+            if (next_node->prev) {
+                next_node->prev->next = next_node->next;
+            } else {
+                if (next_node->next)
+                    allocator->head = next_node->next;
+            }
+            if (next_node->next) {
+                next_node->next->prev = next_node->prev;
+            }
+
+            next_node->prev = 0;
+            next_node->next = 0;
+            next_node->size = 0;
+            next_node->unique = 0;
+            next_node = (freelist_header*)((u8*)node + node->size);
+        }
+        node = node->next;
+    }
+
+    unordered_set_destroy(set);
+    LOGT("freelist_allocator : coalescing completed ");
 }

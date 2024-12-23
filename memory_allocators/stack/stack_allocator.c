@@ -19,6 +19,11 @@ stack_allocator* stack_allocator_create(u64 size) {
     }
     stack_allocator* allocator = zmemory_allocate(sizeof(stack_allocator));
     allocator->block = zmemory_allocate(size);
+    if (allocator->block == 0) {
+        LOGE("stack_allocator_create : failed to allocate memory ");
+        zmemory_free(allocator, sizeof(stack_allocator));
+        return 0;
+    }
     allocator->size = size;
     allocator->used = 0;
     LOGT("stack_allocator_create");

@@ -25,10 +25,13 @@ linear_allocator* linear_allocator_create(u64 size) {
     allocator->block = zmemory_allocate(size);
     if (allocator->block == 0) {
         LOGE("linear_allocator_create: failed to allocate size = %llu", size);
+        zmemory_free(allocator, sizeof(linear_allocator));
         return 0;
     }
     if (!zmutex_create(&allocator->mutex)) {
         LOGE("linear_allocator_create: failed to create mutex");
+        zmemory_free(allocator->block, allocator->size);
+        zmemory_free(allocator, sizeof(linear_allocator));
         return 0;
     }
 

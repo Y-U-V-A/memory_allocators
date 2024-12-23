@@ -1,4 +1,4 @@
-#include "testing_linear_allocator.h"
+#include "testing_buddy_allocator.h"
 #include "zthread.h"
 #include "expect.h"
 #include "test_manager.h"
@@ -96,7 +96,8 @@ void* buddy_thread_alloc_free(void* arg) {
     void* ptrs[ALLOCS_PER_THREAD];
 
     for (i32 i = 0; i < ALLOCS_PER_THREAD; i++) {
-        u64 size = (random_int(0, 1000) % MAX_ALLOC_SIZE) + 1;
+        u64 size = (random_int(0, 1000) % MAX_ALLOC_SIZE) * 2;
+
         ptrs[i] = buddy_allocator_allocate(data->allocator, size);
         if (!buddy_verify_allocation(ptrs[i], size)) {
             data->success = false;
