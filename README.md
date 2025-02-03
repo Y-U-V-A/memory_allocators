@@ -1,2 +1,2 @@
 # memory_allocators
-custom memory allocators written in C
+Thread safe memory allocators written in C 
